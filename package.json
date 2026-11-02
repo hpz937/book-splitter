@@ -1,0 +1,32 @@
+{
+  "name": "book-splitter-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that splits ebooks (EPUB, PDF, TXT/MD, MOBI via Calibre) into chapter-sized chunks for parallel summarization",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "split": "node src/cli.js",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "adm-zip": "^0.6.1",
+    "fast-xml-parser": "^5.11.2",
+    "node-html-parser": "^9.0.6",
+    "pdfjs-dist": "^6.5.438",
+    "zod": "^4.6.7"
+  },
+  "type": "module",
+  "bin": {
+    "book-splitter-mcp": "src/index.js",
+    "book-split": "src/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ]
+}
