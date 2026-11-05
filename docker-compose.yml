@@ -1,0 +1,42 @@
+# book-splitter MCP server
+#
+#   cp .env.example .env      # then set BOOKS_DIR and MCP_AUTH_TOKEN
+#   docker compose up -d --build
+#
+# Endpoints: http://localhost:8787/mcp (streamable HTTP), /sse (legacy SSE), /health
+
+services:
+  book-splitter:
+    build:
+      context: .
+      args:
+        INSTALL_CALIBRE: ${INSTALL_CALIBRE:-false}
+    image: book-splitter-mcp:latest
+    container_name: book-splitter
+    restart: unless-stopped
+    environment:
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN in .env}
+      BOOK_SPLITTER_MAX_TOKENS: ${BOOK_SPLITTER_MAX_TOKENS:-12000}
+      BOOK_SPLITTER_MIN_TOKENS: ${BOOK_SPLITTER_MIN_TOKENS:-400}
+      BOOK_SPLITTER_WORDS_PER_PAGE: ${BOOK_SPLITTER_WORDS_PER_PAGE:-300}
+    volumes:
+      # Your ebook folder, mounted read-only. Inside the container it is /books.
+      - ${BOOKS_DIR:?Set BOOKS_DIR in .env}:/books:ro
+      # Parsed-book cache (survives restarts/rebuilds)
+      - book-cache:/cache
+    ports:
+      # Reachable from this machine only. Use "8787:8787" to expose on your LAN.
+      - "127.0.0.1:${HOST_PORT:-8787}:8787"
+    # To let a LibreChat stack reach this by service name (http://book-splitter:8787/mcp),
+    # uncomment this and the matching block at the bottom:
+    # networks:
+    #   - default
+    #   - librechat
+
+volumes:
+  book-cache:
+
+# networks:
+#   librechat:
+#     external: true
+#     name: librechat_default   # check with: docker network ls

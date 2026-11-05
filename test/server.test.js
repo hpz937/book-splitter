@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
@@ -69,7 +69,7 @@ after(async () => {
 
 test("exposes tools and prompt", async () => {
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["find_books", "get_chapter", "get_overview", "list_books", "load_book"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["find_books", "get_chapter", "get_overview", "list_books", "load_book", "remove_books"]);
   const { prompts } = await client.listPrompts();
   assert.equal(prompts[0].name, "summarize_book");
 });
@@ -127,4 +127,83 @@ test("find_books lists files in the book folder and loads by relative name", asy
   assert.equal(r.isError, undefined);
   const outside = await call("load_book", { path: path.resolve("package.json") });
   assert.match(outside.text, /outside BOOK_SPLITTER_ROOTS/);
+});
+
+test("moved books keep working; deleted books are flagged and can be removed", async () => {
+  // move: same content at a new path reuses the cache and updates the source
+  await copyFile(path.join(dir, "book.txt"), path.join(dir, "moved.txt"));
+  await rm(path.join(dir, "book.txt"));
+  let list = JSON.parse((await call("list_books", {})).text);
+  const txt = list.find((b) => b.source.endsWith("book.txt"));
+  assert.equal(txt.missing, true);
+  assert.equal((await call("get_chapter", { book_id: txt.book_id, index: 0 })).isError, undefined, "still readable from cache");
+  await call("load_book", { path: "moved.txt", min_tokens: 100 });
+  list = JSON.parse((await call("list_books", {})).text);
+  assert.ok(list.find((b) => b.book_id === txt.book_id).source.endsWith("moved.txt"));
+  assert.ok(!list.some((b) => b.missing));
+
+  // delete: flagged, then removed by default cleanup; other books untouched
+  await rm(path.join(dir, "moved.txt"));
+  const r = JSON.parse((await call("remove_books", {})).text);
+  assert.deepEqual(r.removed.map((b) => b.book_id), [txt.book_id]);
+  list = JSON.parse((await call("list_books", {})).text);
+  assert.ok(!list.some((b) => b.book_id === txt.book_id));
+  assert.ok(list.some((b) => b.title === "Fixture Book"));
+  assert.equal((await call("get_chapter", { book_id: txt.book_id, index: 0 })).isError, true);
+
+  // explicit id and all=true
+  const epubId = list.find((b) => b.title === "Fixture Book").book_id;
+  assert.equal(JSON.parse((await call("remove_books", { book_id: epubId })).text).removed.length, 1);
+  assert.equal((await call("remove_books", { book_id: "nope" })).isError, true);
+  await call("load_book", { path: "book.epub" });
+  await call("remove_books", { all: true });
+  assert.deepEqual(JSON.parse((await call("list_books", {})).text), []);
+});
+
+test("word counts, real EPUB print pages, and page estimates", async () => {
+  // EPUB with print page markers: typed <span epub:type="pagebreak"> in ch1, page-list ids in ch2
+  const zip = new AdmZip();
+  zip.addFile("mimetype", Buffer.from("application/epub+zip"));
+  zip.addFile("META-INF/container.xml", Buffer.from(
+    `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+     <rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`));
+  zip.addFile("content.opf", Buffer.from(
+    `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Paged</dc:title></metadata>
+     <manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+       <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/></manifest>
+     <spine><itemref idref="a"/><itemref idref="b"/></spine></package>`));
+  const pages2 = Array.from({ length: 5 }, (_, i) => `<li><a href="b.xhtml#pg${20 + i}">${20 + i}</a></li>`).join("");
+  zip.addFile("nav.xhtml", Buffer.from(
+    `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
+     <nav epub:type="toc"><ol><li><a href="a.xhtml">One</a></li><li><a href="b.xhtml">Two</a></li></ol></nav>
+     <nav epub:type="page-list"><ol>${pages2}</ol></nav></body></html>`));
+  const words = (n) => Array.from({ length: n }, (_, i) => `word${i}`).join(" ");
+  const a = Array.from({ length: 4 }, (_, i) =>
+    `<p>${i ? `<span epub:type="pagebreak" id="p${i}" title="${i + 10}"/>` : ""}${words(300)}</p>`).join("");
+  const b = Array.from({ length: 5 }, (_, i) => `<p id="pg${20 + i}">${words(300)}</p>`).join("");
+  const page = (body) => Buffer.from(`<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>${body}</body></html>`);
+  zip.addFile("a.xhtml", page(`<h1>One</h1>${a}`));
+  zip.addFile("b.xhtml", page(`<h1>Two</h1>${b}`));
+  zip.writeZip(path.join(dir, "paged.epub"));
+
+  const r = await call("load_book", { path: "paged.epub", min_tokens: 100 });
+  const book = JSON.parse(r.text.slice(0, r.text.indexOf("\n\nNext:")));
+  assert.equal(book.words, 2 + 9 * 300); // two headings + 9 paragraphs
+  assert.deepEqual(book.pages, { count: 24, source: "print edition (page list in file)" });
+  // One: first marker comes after a full paragraph, but there's no earlier page to carry, so it starts at 11.
+  // Two: marker right after the heading → starts on 20, not the carried-over 13.
+  assert.deepEqual(book.chunks.map((c) => c.pages), ["pp. 11–13", "pp. 20–24"]);
+  assert.deepEqual(book.chunks.map((c) => c.words), [1201, 1501]);
+
+  const ch = await call("get_chapter", { book_id: book.book_id, index: 1 });
+  assert.match(ch.text, /Pages: pp\. 20–24 · 1,501 words/);
+  assert.ok(!/[]/.test(ch.text), "page markers must be stripped from text");
+
+  // no page markers → estimate, adjustable words_per_page
+  const est = JSON.parse((await call("load_book", { path: path.join(dir, "book.epub"), words_per_page: 250 })).text.split("\n\nNext:")[0]);
+  assert.equal(est.pages.source, "estimate from word count");
+  assert.equal(est.pages.words_per_page, 250);
+  assert.equal(est.pages.estimate, Math.round(est.words / 250));
+  assert.ok(est.chunks.every((c) => c.pages.startsWith("~")));
 });

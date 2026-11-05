@@ -37,15 +37,112 @@ claude mcp add book-splitter -- node /absolute/path/to/book-splitter/src/index.j
 }
 ```
 
+### LibreChat and other HTTP clients (Streamable HTTP / SSE)
+
+Clients that can't start a local process connect over HTTP instead. Run the server in HTTP mode:
+
+```bash
+node src/index.js --http                 # or: npm run start:http
+```
+
+| Endpoint | Transport |
+|---|---|
+| `POST /mcp` | Streamable HTTP, the current MCP transport. Use this one. |
+| `GET /sse` + `POST /messages` | Legacy HTTP+SSE, for older clients |
+| `GET /health` | Health check, no auth required |
+
+By default the server listens on `127.0.0.1:8787` (`--port` / `--host`, or `MCP_PORT` / `MCP_HOST`).
+
+**Windows + LibreChat in Docker Desktop.** This is the common setup: the server runs on your PC and
+LibreChat's container reaches it at `host.docker.internal`.
+
+1. Generate a token: `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`
+2. Start the server (PowerShell):
+   ```powershell
+   $env:BOOK_SPLITTER_ROOTS = "C:\Users\YourName\Books"
+   $env:MCP_AUTH_TOKEN = "<token>"
+   node C:\path\to\book-splitter\src\index.js --http --host 0.0.0.0
+   ```
+   `0.0.0.0` lets the container reach the server. If Windows Firewall asks, allow **Private networks** only.
+3. In LibreChat's `.env`, add `BOOK_SPLITTER_TOKEN=<token>`. In `librechat.yaml`:
+   ```yaml
+   mcpSettings:
+     allowedAddresses:
+       - 'host.docker.internal:8787'   # LibreChat blocks private/local addresses unless listed
+
+   mcpServers:
+     book-splitter:
+       type: streamable-http
+       url: http://host.docker.internal:8787/mcp
+       headers:
+         Authorization: 'Bearer ${BOOK_SPLITTER_TOKEN}'
+       timeout: 120000                 # first load of a large PDF can take a while
+   ```
+   For the legacy transport, use `type: sse` and `url: http://host.docker.internal:8787/sse` instead.
+4. Restart LibreChat.
+
+Paths are resolved on the machine running book-splitter, not inside LibreChat's container, so Windows paths
+and `find_books` work as usual.
+
+**Security in HTTP mode:**
+- `MCP_AUTH_TOKEN`: when set, every request must send `Authorization: Bearer <token>` (or `X-API-Key: <token>`).
+  Always set it when listening on anything other than `127.0.0.1`; the server prints a warning if you don't.
+- Requests are checked for DNS rebinding: when bound to loopback, only `localhost`, `127.0.0.1`,
+  `host.docker.internal` and the names listed in `MCP_ALLOWED_HOSTS` (comma-separated) are accepted.
+- HTTPS: set `MCP_TLS_CERT` and `MCP_TLS_KEY` to PEM files, or put the server behind a reverse proxy (Caddy, nginx)
+  for a public hostname. In that case, raise the proxy's timeouts for long tool calls.
+- Streamable HTTP is stateless: each request gets a fresh MCP session, and book state lives in the shared cache.
+  Parallel `get_chapter` calls are therefore safe, and a server restart doesn't break a summary in progress.
+
+### Docker / Docker Compose
+
+This runs the HTTP server in a container. It needs no Node install on the host and restarts automatically.
+
+```bash
+cp .env.example .env        # set BOOKS_DIR and MCP_AUTH_TOKEN
+docker compose up -d --build
+docker compose logs -f      # shows the listening URLs
+```
+
+- **Books:** `BOOKS_DIR` is mounted **read-only** at `/books` inside the container. On Windows, use forward
+  slashes: `BOOKS_DIR=C:/Users/YourName/Books`. Tools see paths like `/books/Herbert/Dune.epub`; `find_books`
+  lists them, and relative paths (`Herbert/Dune.epub`) work too.
+- **Cache:** stored in the `book-cache` named volume, so it survives rebuilds. Clear it with `docker compose down -v`.
+- **Port:** published on `127.0.0.1:8787` only. Change `HOST_PORT` to use a different port, or edit `ports:` to
+  expose it on your LAN.
+- **MOBI / AZW3 / FB2 / DOCX:** set `INSTALL_CALIBRE=true` in `.env` and rebuild. This adds about 500 MB.
+- **Runs as** the unprivileged `node` user, with a healthcheck on `/health`.
+
+**Connecting LibreChat to the container:**
+
+- **LibreChat in its own Docker stack (recommended):** join the two stacks on one network. Uncomment the
+  `networks:` blocks in `docker-compose.yml`, and check the network name with `docker network ls` (it's usually
+  `librechat_default`). Then, in `librechat.yaml`:
+  ```yaml
+  mcpSettings:
+    allowedAddresses:
+      - 'book-splitter:8787'
+  mcpServers:
+    book-splitter:
+      type: streamable-http
+      url: http://book-splitter:8787/mcp
+      headers:
+        Authorization: 'Bearer ${BOOK_SPLITTER_TOKEN}'
+      timeout: 120000
+  ```
+- **Without sharing a network:** use `url: http://host.docker.internal:8787/mcp` and
+  `allowedAddresses: ['host.docker.internal:8787']`. This goes through the published port.
+
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `find_books(query?, directory?)` | List ebook files in your book folder(s) (`BOOK_SPLITTER_ROOTS`), searched recursively. `query` filters by words in the path. Already-loaded files show their `book_id`. |
-| `load_book(path, max_tokens?, min_tokens?, include_matter?)` | Parse and split. `path` can be absolute or relative to the book folder (e.g. `Herbert/Dune.epub`). Returns `book_id`, metadata and the chunk list `[{index, title, within, chapter, part, tokens}]`. |
+| `load_book(path, max_tokens?, min_tokens?, include_matter?, words_per_page?)` | Parse and split. `path` can be absolute or relative to the book folder (e.g. `Herbert/Dune.epub`). Returns `book_id`, metadata, `words`, `pages`, and the chunk list `[{index, title, within, chapter, part, words, pages, tokens}]`. |
 | `get_chapter(book_id, index)` | Full text of one chunk, with a header giving its position in the book (chapter n of m, part x of y, parent section). |
 | `get_overview(book_id, opening_tokens?)` | Contents list + the book's opening. Use it to write a short "book brief" that every parallel summarizer gets as context. |
-| `list_books()` | Books already loaded with `load_book` (persisted in the cache, so ids survive restarts). Not a directory listing — use `find_books` for that. |
+| `list_books()` | Books already loaded with `load_book` (cached, so ids survive restarts). Books whose file was moved or deleted are flagged `"missing": true`. Not a directory listing — use `find_books` for that. |
+| `remove_books(book_id?, all?)` | Clean up the cache. No arguments = remove only missing books; `book_id` = one book; `all: true` = everything. Never touches your ebook files. |
 
 There's also an MCP **prompt**, `summarize_book(path, focus?)`, which contains the full map-reduce instructions,
 so clients that support prompts can start a summary in one step.
@@ -70,6 +167,46 @@ so clients that support prompts can start a summary in one step.
 
 Token counts are estimates (characters ÷ 4).
 
+## Word and page counts
+
+`load_book` reports the book's word count and page count, and gives each chunk a page range. Summaries can use
+the ranges for references like "Chapter 3 (pp. 45–67)".
+
+- **Real pages are used when the file has them:**
+  - **PDF:** the PDF's page count. Chunk ranges use the printed page labels if the PDF defines them
+    (e.g. `xii`, `45`); otherwise they use physical page numbers.
+  - **EPUB with print page numbers:** many publisher EPUBs embed the print edition's pagination (a `page-list`
+    and/or `epub:type="pagebreak"` markers). The count is the highest page number, so roman-numeral front matter
+    isn't counted. A chunk that starts partway through a page gets that page as its start.
+- **Otherwise pages are estimated from word count**, at 300 words per page by default, and reported with a
+  range (250–350 words per page) because print layouts vary. Estimated chunk ranges start with `~`
+  (`~pp. 45–67`). Change the rate per call with `words_per_page`, or set the default with
+  `BOOK_SPLITTER_WORDS_PER_PAGE`. Use about 250 for hardcovers and about 350 for mass-market paperbacks.
+  Estimates are usually within 10–20% of a print edition, but less reliable for books with heavy dialogue,
+  poetry or many images.
+
+```json
+"words": 213757,
+"pages": { "estimate": 713, "range": "609–858", "words_per_page": 300, "source": "estimate from word count" }
+```
+
+Word counts cover the chunks that are kept, so skipped front and back matter isn't included.
+
+## The cache
+
+Loaded books are cached by **file content**, not by path. This means:
+
+- **Moved or renamed file:** loading it from the new location reuses the cache, and the stored path is updated.
+- **Deleted file:** the book stays in the cache. `list_books` marks it `missing`, but `get_chapter` still works,
+  because the text is stored in the cache. Ask the model to "clean up missing books" (`remove_books` with no
+  arguments) to drop it.
+- **Edited file:** the content hash changes, so it's treated as a new book with a new `book_id`. The old entry
+  becomes `missing` and is cleared by the same cleanup.
+
+To clear the cache by hand, delete the cache folder (`%USERPROFILE%\.cache\book-splitter` on Windows,
+`~/.cache/book-splitter` elsewhere, or wherever `BOOK_SPLITTER_CACHE` points). Each loaded book takes up
+roughly the size of its plain text, typically 0.5–2 MB.
+
 ## Configuration (env vars)
 
 | Variable | Default | |
@@ -78,6 +215,12 @@ Token counts are estimates (characters ÷ 4).
 | `BOOK_SPLITTER_CACHE` | `~/.cache/book-splitter` | Cache directory. |
 | `BOOK_SPLITTER_MAX_TOKENS` | `12000` | Default max chunk size. |
 | `BOOK_SPLITTER_MIN_TOKENS` | `400` | Default merge threshold. |
+| `BOOK_SPLITTER_WORDS_PER_PAGE` | `300` | Words per page for page estimates. |
+| `MCP_TRANSPORT` | `stdio` | `http` is the same as `--http`. |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `8787` | HTTP listen address. |
+| `MCP_AUTH_TOKEN` | *(unset)* | Bearer token required in HTTP mode. |
+| `MCP_ALLOWED_HOSTS` | *(unset)* | Extra `Host` header names accepted when bound to loopback. |
+| `MCP_TLS_CERT` / `MCP_TLS_KEY` | *(unset)* | PEM files; serve HTTPS instead of HTTP. |
 | `EBOOK_CONVERT` | `ebook-convert` | Path to Calibre's converter. |
 
 ## Example plain-text prompt for the summarizing model

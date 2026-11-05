@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NATIVE, VIA_CALIBRE, parseBook } from "./parsers/index.js";
 import { finalizeChunks } from "./chunker.js";
+import { finalizePages, propagatePages } from "./pages.js";
+import { estimateTokens } from "./text.js";
 
-const PARSER_VERSION = 1;
+const PARSER_VERSION = 2;
 
 export const DEFAULTS = {
   maxTokens: Number(process.env.BOOK_SPLITTER_MAX_TOKENS) || 12000,
@@ -106,8 +108,10 @@ export async function loadBook(inputPath, options = {}) {
   let book = await readFile(cacheFile, "utf8").then(JSON.parse).catch(() => null);
   if (!book) {
     const parsed = await parseBook(file, opts, { workDir: cacheDir, hash });
+    const printPages = propagatePages(parsed.chapters); // before matter is skipped, so numbering stays intact
     const { chunks, skipped, chapterCount } = finalizeChunks(parsed.chapters, opts);
     if (!chunks.length) throw new Error("No text could be extracted from this book.");
+    finalizePages(chunks, estimateTokens);
     book = {
       id,
       title: parsed.title,
@@ -117,6 +121,11 @@ export async function loadBook(inputPath, options = {}) {
       source: file,
       options: opts,
       totalTokens: chunks.reduce((n, c) => n + c.tokens, 0),
+      words: chunks.reduce((n, c) => n + c.words, 0),
+      // real pagination: PDF page count, or the print edition's page list embedded in an EPUB
+      pagination: parsed.format === "pdf"
+        ? { count: parsed.pages, source: "pdf" }
+        : printPages ? { count: printPages.count, source: "print edition (page list in file)" } : null,
       chapterCount,
       chunks,
       skipped,
@@ -125,7 +134,11 @@ export async function loadBook(inputPath, options = {}) {
     await mkdir(booksDir, { recursive: true });
     await writeFile(cacheFile, JSON.stringify(book));
   }
-  book.source = file;
+  if (book.source !== file) {
+    // same content found at a new path (file was moved/renamed) — remember where it lives now
+    book.source = file;
+    await writeFile(cacheFile, JSON.stringify(book)).catch(() => {});
+  }
   memory.set(id, book);
   // remember the most recent option set so the id stays usable after a restart
   await mkdir(booksDir, { recursive: true });
@@ -143,6 +156,8 @@ export async function getBook(id) {
   return book;
 }
 
+const exists = (p) => access(p).then(() => true, () => false);
+
 export async function listBooks() {
   const booksDir = path.join(cacheDir, "books");
   const files = (await readdir(booksDir).catch(() => [])).filter((f) => f.endsWith(".latest"));
@@ -150,8 +165,41 @@ export async function listBooks() {
   for (const f of files) {
     try {
       const b = await getBook(f.replace(/\.latest$/, ""));
-      out.push({ book_id: b.id, title: b.title, author: b.author, chunks: b.chunks.length, source: b.source });
+      out.push({
+        book_id: b.id, title: b.title, author: b.author, chunks: b.chunks.length, source: b.source,
+        ...((await exists(b.source)) ? {} : { missing: true }),
+      });
     } catch {}
   }
   return out;
+}
+
+/**
+ * Delete cached books.
+ * @param {{bookId?: string, all?: boolean}} opts  default: only books whose source file no longer exists
+ */
+export async function removeBooks({ bookId, all = false } = {}) {
+  const booksDir = path.join(cacheDir, "books");
+  const convertedDir = path.join(cacheDir, "converted");
+  const books = await listBooks();
+  let targets;
+  if (bookId) {
+    targets = books.filter((b) => b.book_id === bookId);
+    if (!targets.length) throw new Error(`Unknown book_id "${bookId}".`);
+  } else {
+    targets = all ? books : books.filter((b) => b.missing);
+  }
+  const ids = new Set(targets.map((t) => t.book_id));
+  // every option variant (<id>-v1-400-12000-0.json), the .latest pointer, and Calibre conversions (<fullhash>.epub)
+  for (const [dir, match] of [[booksDir, (f) => ids.has(f.slice(0, 12))],
+                              [convertedDir, (f) => ids.has(f.slice(0, 12))]]) {
+    for (const f of await readdir(dir).catch(() => [])) {
+      if (match(f)) await rm(path.join(dir, f), { force: true });
+    }
+  }
+  for (const id of ids) memory.delete(id);
+  return {
+    removed: targets.map(({ book_id, title, source }) => ({ book_id, title, source })),
+    remaining: books.length - targets.length,
+  };
 }

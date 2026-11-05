@@ -4,6 +4,7 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { normKey, normalizeWhitespace } from "../text.js";
 import { detectHeadings } from "../headings.js";
 import { chaptersFromToc, cutText } from "../structure.js";
+import { pageMark } from "../pages.js";
 
 export async function parsePdf(file, opts) {
   const data = new Uint8Array(await readFile(file));
@@ -22,12 +23,15 @@ export async function parsePdf(file, opts) {
       page.cleanup();
     }
     stripRunningHeaders(pageLines);
-    const pageTexts = pageLines.map(toParagraphs);
+    const plainTexts = pageLines.map(toParagraphs);
 
-    const chars = pageTexts.reduce((n, t) => n + t.length, 0);
+    const chars = plainTexts.reduce((n, t) => n + t.length, 0);
     if (chars / doc.numPages < 100) {
       warnings.push("Very little extractable text — this PDF is probably scanned. Run OCR first (e.g. `ocrmypdf in.pdf out.pdf`).");
     }
+    // Printed page labels ("iv", "12") when the PDF defines them, else physical page numbers
+    const labels = await doc.getPageLabels().catch(() => null);
+    const pageTexts = plainTexts.map((t, i) => `${pageMark(labels?.[i] || i + 1)}\n\n${t}`);
 
     let chapters = null;
     const outline = await doc.getOutline().catch(() => null);

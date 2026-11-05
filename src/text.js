@@ -1,4 +1,5 @@
 import { parse } from "node-html-parser";
+import { pageMark } from "./pages.js";
 
 /** Rough token estimate (~4 chars per token for English prose). */
 export const estimateTokens = (text) => Math.ceil((text?.length ?? 0) / 4);
@@ -10,8 +11,12 @@ const BLOCK = new Set([
 ]);
 const SKIP = new Set(["script", "style", "head", "title", "svg", "math", "noscript"]);
 
-/** Convert (X)HTML into readable plain text, keeping paragraph breaks. */
-export function htmlToText(html) {
+/**
+ * Convert (X)HTML into readable plain text, keeping paragraph breaks.
+ * Print page breaks (epub:type="pagebreak", role="doc-pagebreak", or ids listed in the
+ * EPUB page-list via `pageIds`: Map<id, label>) become invisible page markers.
+ */
+export function htmlToText(html, { pageIds } = {}) {
   html = html.replace(/<\?[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[^>[]*(\[[\s\S]*?\])?>/gi, "");
   const root = parse(html, {
     lowerCaseTagName: true,
@@ -29,6 +34,14 @@ export function htmlToText(html) {
     if (node.nodeType !== 1) return;
     const tag = node.rawTagName?.toLowerCase().replace(/^.*:/, "");
     if (tag && SKIP.has(tag)) return;
+    const id = node.getAttribute?.("id");
+    const typed = /\bpagebreak\b/.test(`${node.getAttribute?.("epub:type") ?? ""} ${node.getAttribute?.("role") ?? ""}`);
+    if (typed || (id && pageIds?.has(id))) {
+      const label = pageIds?.get(id) ?? node.getAttribute("title") ?? node.getAttribute("aria-label") ??
+        (node.text.trim() || id?.replace(/^\D+/, ""));
+      if (label) out.push(pageMark(label));
+      if (typed) return; // typed page-break elements only hold the printed number
+    }
     if (tag === "br") return void out.push("\n");
     if (tag === "img") {
       const alt = node.getAttribute?.("alt")?.trim();

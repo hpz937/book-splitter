@@ -3,6 +3,7 @@ import { XMLParser } from "fast-xml-parser";
 import { parse as parseHtml } from "node-html-parser";
 import path from "node:path";
 import { htmlToText } from "../text.js";
+import { pageMark } from "../pages.js";
 import { chaptersFromToc, cutText } from "../structure.js";
 
 const xml = new XMLParser({
@@ -81,6 +82,22 @@ export async function parseEpub(file, opts) {
     if (ncxItem) toc = readNcx(read(ncxItem.file), ncxItem.file);
   }
 
+  // ---- print page list (maps page labels to anchors in the text) -----------
+  let pageList = navItem ? readNav(read(navItem.file), navItem.file, "page-list") : [];
+  if (!pageList.length) {
+    const ncxItem = manifest.get(opf.spine?.["@_toc"]) ??
+      [...manifest.values()].find((m) => m.type === "application/x-dtbncx+xml");
+    if (ncxItem) pageList = readNcxPages(read(ncxItem.file), ncxItem.file);
+  }
+  const pageIdsByFile = new Map(); // file -> Map(id -> label)
+  const pageAtFileStart = new Map(); // file -> label (page-list entry with no #fragment)
+  for (const pg of pageList) {
+    if (!pg.title) continue;
+    if (!pg.frag) { pageAtFileStart.set(pg.file, pg.title); continue; }
+    if (!pageIdsByFile.has(pg.file)) pageIdsByFile.set(pg.file, new Map());
+    pageIdsByFile.get(pg.file).set(pg.frag, pg.title);
+  }
+
   // ---- cut spine files at every TOC fragment target ------------------------
   const fragsByFile = new Map();
   for (const t of toc) {
@@ -103,7 +120,11 @@ export async function parseEpub(file, opts) {
     const { parts, starts } = cutText(html, [...offsets.values()]);
     const base = segments.length;
     anchors.set(f, base);
-    parts.forEach((p) => segments.push(htmlToText(p)));
+    const pageIds = pageIdsByFile.get(f);
+    parts.forEach((p, i) => {
+      const t = htmlToText(p, { pageIds });
+      segments.push(i === 0 && pageAtFileStart.has(f) ? `${pageMark(pageAtFileStart.get(f))}\n\n${t}` : t);
+    });
     for (const [frag, off] of offsets) {
       const i = starts.indexOf(off);
       anchors.set(`${f}#${frag}`, base + (i === -1 ? 0 : i));
@@ -134,11 +155,13 @@ export async function parseEpub(file, opts) {
   };
 }
 
-function readNav(html, navFile) {
+function readNav(html, navFile, kind = "toc") {
   if (!html) return [];
   const root = parseHtml(html, { lowerCaseTagName: true });
   const navs = root.querySelectorAll("nav");
-  const nav = navs.find((n) => /\btoc\b/.test(n.getAttribute("epub:type") ?? n.getAttribute("role") ?? "")) ?? navs[0];
+  const isKind = (n) => new RegExp(`\\b(?:doc-)?${kind === "toc" ? "toc" : "page-?list"}\\b`)
+    .test(`${n.getAttribute("epub:type") ?? ""} ${n.getAttribute("role") ?? ""}`);
+  const nav = navs.find(isKind) ?? (kind === "toc" ? navs[0] : null);
   const ol = nav?.querySelector("ol");
   if (!ol) return [];
   const out = [];
@@ -171,4 +194,12 @@ function readNcx(src, ncxFile) {
   };
   walk(map?.navPoint, 0);
   return out;
+}
+
+function readNcxPages(src, ncxFile) {
+  if (!src) return [];
+  const targets = xml.parse(src)?.ncx?.pageList?.pageTarget;
+  return [targets ?? []].flat()
+    .filter((t) => t.content?.["@_src"])
+    .map((t) => ({ title: textOf(t.navLabel?.text) ?? t["@_value"], ...resolveHref(ncxFile, t.content["@_src"]) }));
 }

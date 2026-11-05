@@ -1,4 +1,5 @@
 import { estimateTokens } from "./text.js";
+import { stripMarks } from "./pages.js";
 
 // Sections that rarely matter for a summary. Skipped unless include_matter is set.
 const MATTER_RE = new RegExp(
@@ -23,7 +24,7 @@ export function finalizeChunks(rawChapters, { minTokens, maxTokens, includeMatte
   const chapters = [];
   for (const c of rawChapters) {
     const text = c.text?.trim();
-    if (!text) continue;
+    if (!text || !stripMarks(text).trim()) continue;
     const tokens = estimateTokens(text);
     const isMatter = MATTER_RE.test(c.title.trim().replace(/[.:]$/, ""));
     // Untitled content before the first TOC entry: drop if small (cover/title/copyright pages)

@@ -5,6 +5,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { loadBook } from "./library.js";
+import { bookPages, chunkPageRanges } from "./pages.js";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -48,11 +49,14 @@ try {
   } else {
     const out = [];
     out.push(`${book.title}${book.author ? ` — ${book.author}` : ""}  [${book.format}]  id=${book.id}`);
-    out.push(`${book.chunks.length} chunks · ${book.chapterCount} chapters · ~${book.totalTokens.toLocaleString("en-US")} tokens\n`);
+    const pg = bookPages(book);
+    const pages = pg.count ? `${pg.count} pages (${pg.source})` : `~${pg.estimate} pages (est. ${pg.range} @ ${pg.words_per_page} words/page)`;
+    out.push(`${book.chunks.length} chunks · ${book.chapterCount} chapters · ${book.words.toLocaleString("en-US")} words · ${pages} · ~${book.totalTokens.toLocaleString("en-US")} tokens\n`);
+    const ranges = chunkPageRanges(book);
     for (const c of book.chunks) {
       const where = c.path?.length ? `${c.path.join(" › ")} › ` : "";
       const part = c.parts > 1 ? ` (${c.part}/${c.parts})` : "";
-      out.push(`${String(c.index).padStart(4)}  ${String(c.tokens).padStart(6)} tok  ${where}${c.title}${part}`);
+      out.push(`${String(c.index).padStart(4)}  ${String(c.words).padStart(6)} w  ${ranges[c.index].padEnd(15)} ${where}${c.title}${part}`);
     }
     if (book.skipped.length) out.push(`\nSkipped: ${book.skipped.map((s) => s.title).join(", ")}`);
     for (const w of book.warnings) out.push(`Warning: ${w}`);
