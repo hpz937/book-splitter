@@ -1,6 +1,7 @@
 // Tool/prompt definitions, shared by the stdio and HTTP entry points.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerPrompts } from "./prompts.js";
 import { DEFAULTS, findBooks, getBook, listBooks, loadBook, removeBooks } from "./library.js";
 import { DEFAULT_WORDS_PER_PAGE, bookPages, chunkPageRanges } from "./pages.js";
 
@@ -54,7 +55,7 @@ function bookSummary(book) {
 
 /** Build a fresh MCP server with all book-splitter tools registered. */
 export function createServer() {
-  const server = new McpServer({ name: "book-splitter", version: "0.2.0" });
+  const server = new McpServer({ name: "book-splitter", version: "0.3.0" });
 
   server.registerTool("load_book", {
     title: "Load book",
@@ -206,30 +207,7 @@ export function createServer() {
     }
   });
 
-  server.registerPrompt("summarize_book", {
-    title: "Summarize a book",
-    description: "Map-reduce summary of an ebook using the book-splitter tools",
-    argsSchema: {
-      path: z.string().describe("Path to the ebook, or a file name inside the book folder"),
-      focus: z.string().optional().describe("Optional focus or style, e.g. 'key arguments' or 'plot and characters'"),
-    },
-  }, ({ path, focus }) => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: `Summarize the book at ${path}.${focus ? ` Focus: ${focus}.` : ""}
-
-  1. Call load_book with that path (if it isn't found, use find_books to locate the file). Note the book_id and chunk list.
-  2. Call get_overview and write a 5–10 line "book brief": genre, premise, main characters or core concepts.
-  3. For every chunk index, call get_chapter and summarize it in 150–300 words, using the brief for context.
-     Chunks are independent — process them in parallel if you can. Chunks sharing a chapter number are parts of
-     one chapter; treat them together.
-  4. Combine the chapter summaries into a final summary: a one-paragraph overview, then a section per chapter
-     (or per part of the book), then key themes/takeaways. Resolve names and threads across chapters.`,
-      },
-    }],
-  }));
+  registerPrompts(server);
 
   return server;
 }

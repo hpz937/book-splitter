@@ -144,7 +144,7 @@ docker compose logs -f      # shows the listening URLs
 | `list_books()` | Books already loaded with `load_book` (cached, so ids survive restarts). Books whose file was moved or deleted are flagged `"missing": true`. Not a directory listing — use `find_books` for that. |
 | `remove_books(book_id?, all?)` | Clean up the cache. No arguments = remove only missing books; `book_id` = one book; `all: true` = everything. Never touches your ebook files. |
 
-There's also an MCP **prompt**, `summarize_book(path, focus?)`, which contains the full map-reduce instructions,
+There are also four built-in MCP **prompts** (`summarize_book`, `character_guide`, `book_synopsis`, `book_blurb`); see [Prompts](#prompts). They contain the full map-reduce instructions,
 so clients that support prompts can start a summary in one step.
 
 ## How splitting works
@@ -223,23 +223,90 @@ roughly the size of its plain text, typically 0.5–2 MB.
 | `MCP_TLS_CERT` / `MCP_TLS_KEY` | *(unset)* | PEM files; serve HTTPS instead of HTTP. |
 | `EBOOK_CONVERT` | `ebook-convert` | Path to Calibre's converter. |
 
-## Example plain-text prompt for the summarizing model
+## Prompts
 
+### Built-in MCP prompts
+
+The server includes four ready-made prompts. When one runs, it first finds and loads the book (you can just
+type words like `dune`). The model then starts with the `book_id`, the chunk list with page ranges, and a
+note-length budget scaled to the book's size.
+
+| Prompt | Arguments | What you get |
+|---|---|---|
+| `summarize_book` | `book`, `length` (brief / standard / detailed), `focus`, `up_to` | Plot summary: overview, the story by part or chapter, characters, themes, ending |
+| `character_guide` | `book`, `spoilers` (yes / no), `detail` (main / all), `up_to` | Who's who: arcs, relationships, first appearances; aliases merged |
+| `book_synopsis` | `book`, `length` (short / standard / long), `audience` | Full plot including the ending, in present tense (agent/editor style) |
+| `book_blurb` | `book`, `style`, `words` | Spoiler-free back-cover blurb, short listing blurb, tagline and hooks |
+
+`up_to` (for example `chapter 12` or `page 240`) limits reading to that point. This makes a spoiler-safe recap for
+someone partway through the book.
+
+**Where they appear:** clients show prompts differently. In Claude Desktop, use the **+** / attach menu → the
+book-splitter server. In Claude Code, they're slash commands: `/mcp__book-splitter__character_guide dune`. Some
+clients only use MCP *tools* and never show prompts; for those, paste one of the text prompts below. The tools are
+the same either way.
+
+### Copy-paste prompts
+
+These work in any client that has the book-splitter tools.
+
+**Story summary**
 ```
-Summarize Dune.
-
-1. Call find_books with query "dune" and pick the matching file, then call load_book with its path.
-2. Call get_overview and write a short book brief (genre, premise, main characters or core ideas).
-3. For every chunk index, call get_chapter and summarize it in 150–300 words, using the brief for
-   context. The chunks are independent, so process them in parallel. Chunks with the same `chapter`
-   number are parts of one chapter.
-4. Merge the chapter summaries into: a one-paragraph overview, a section per chapter, and the key
-   themes. Make names and plot threads consistent across chapters.
+Summarize the book "Dune" using the book-splitter tools.
+1. find_books (query "dune") → load_book. Then get_overview, and write a short brief: genre, setting,
+   premise, protagonist.
+2. Read every chunk with get_chapter, in parallel if you can. Give each reader the brief. For each chunk,
+   note in ~200 words: the events in order, who appears and what they do, and threads opened or resolved.
+3. Combine the notes into: a one-paragraph overview; the story by part (headings with page ranges, about
+   1,500 words); the main characters, one line each; 3–5 themes; and how it ends.
+Use only what's in the text, not outside knowledge. Keep names consistent across chapters.
 ```
 
-If your orchestrator runs sub-agents (Claude Code, the Agent SDK, or your own `Promise.all` over API calls),
-give each one the brief plus a single `book_id` and `index`. The chunk sizes are chosen so that each one fits
-comfortably in a single summarization call.
+**Character guide**
+```
+Make a character guide for "Dune" with the book-splitter tools (find_books → load_book → get_overview).
+Read every chunk with get_chapter (in parallel if possible). For each chunk, list each named character who
+appears, along with any other names or titles used for them, what they do, what we learn about them,
+relationships, and status changes (death, reveal, betrayal).
+Then merge aliases and output:
+- Main characters: role, description, arc with chapter references, key relationships, fate.
+- Supporting characters: 1–2 lines each, with their first appearance.
+- Key relationships and how they develop.
+Spoiler-free version: replace "fate" with "no late reveals" and describe characters only as introduced.
+Reader partway through: "Only read up to chapter 12, and reveal nothing after it."
+```
+
+**Synopsis**
+```
+Write a one-page synopsis (500–600 words) of "Dune" with the book-splitter tools.
+Read every chunk and note the plot beats in order (setup, inciting incident, turning points, climax,
+resolution), the protagonist's goal and stakes, and how they change.
+Then write the complete story, including the ending, in present tense and third person, in chronological
+order. Put each main character's name in CAPS the first time it appears. No teaser questions.
+```
+
+**Blurb**
+```
+Write spoiler-free back-cover copy for "Dune" with the book-splitter tools.
+Read the first third of the chunks closely: the protagonist, setting, inciting incident, what they want,
+what stands in the way, and the stakes. Skim the rest for tone and genre only.
+Output:
+- a back-cover blurb of 150–200 words that opens with a hook and ends on tension;
+- a 50-word short blurb;
+- a tagline under 15 words;
+- two alternative hooks.
+Match the genre's voice. No spoilers, no clichés ("in a world where…"), and no invented review quotes or
+awards.
+```
+
+### Tips
+
+- **Parallel reading** gets fast, consistent results on long books. In Claude Code or the Agent SDK, ask for
+  one sub-agent per chunk (or per few chunks), each given the brief from `get_overview`.
+- **Long books with a small-context model:** load with a smaller `max_tokens` (e.g. 6000), and ask for shorter
+  per-chunk notes so all the notes fit in the final step.
+- **Blurbs and synopses** improve with a second pass: ask the model to tighten the draft, cut adjectives, and
+  check that it doesn't reveal the ending.
 
 ## Limitations
 

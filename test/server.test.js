@@ -71,7 +71,7 @@ test("exposes tools and prompt", async () => {
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map((t) => t.name).sort(), ["find_books", "get_chapter", "get_overview", "list_books", "load_book", "remove_books"]);
   const { prompts } = await client.listPrompts();
-  assert.equal(prompts[0].name, "summarize_book");
+  assert.deepEqual(prompts.map((p) => p.name).sort(), ["book_blurb", "book_synopsis", "character_guide", "summarize_book"]);
 });
 
 test("splits an EPUB by TOC, including fragment targets and oversized chapters", async () => {
@@ -206,4 +206,33 @@ test("word counts, real EPUB print pages, and page estimates", async () => {
   assert.equal(est.pages.words_per_page, 250);
   assert.equal(est.pages.estimate, Math.round(est.words / 250));
   assert.ok(est.chunks.every((c) => c.pages.startsWith("~")));
+});
+
+test("prompts resolve the book by search words, and fall back gracefully", async () => {
+  const novel = "CHAPTER I\n\nA Start\n\n" + "Words of the tale. ".repeat(600) + "\n\nCHAPTER II\n\nAn End\n\n" + "More of the tale. ".repeat(600);
+  await writeFile(path.join(dir, "zebra-tale.txt"), novel);
+  await writeFile(path.join(dir, "twin-one.txt"), novel);
+  await writeFile(path.join(dir, "twin-two.txt"), novel + " extra");
+  const get = async (name, args) => (await client.getPrompt({ name, arguments: args })).messages[0].content.text;
+
+  const found = await get("character_guide", { book: "zebra", spoilers: "no", up_to: "chapter 1" });
+  assert.match(found, /\*\*zebra-tale\*\* — book_id `[0-9a-f]{12}`/);
+  assert.match(found, /0 · CHAPTER I: A Start · ~pp?\. [\d–]+ · [\d,]+ words/);
+  assert.match(found, /## Spoiler-free/);
+  assert.match(found, /reader has only reached "chapter 1"/);
+
+  const many = await get("summarize_book", { book: "twin" });
+  assert.match(many, /Several files match "twin"/);
+  assert.match(many, /twin-one\.txt[\s\S]*twin-two\.txt/);
+
+  const none = await get("book_synopsis", { book: "no-such-book" });
+  assert.match(none, /could not be loaded automatically[\s\S]*find_books/);
+
+  const blurb = await get("book_blurb", { book: "zebra-tale.txt", words: "120" });
+  assert.match(blurb, /Back-cover blurb\*\* \(about 120 words\)/);
+
+  const comp = await client.complete({ ref: { type: "ref/prompt", name: "summarize_book" }, argument: { name: "book", value: "zeb" } });
+  assert.deepEqual(comp.completion.values, ["zebra-tale.txt"]);
+  const lens = await client.complete({ ref: { type: "ref/prompt", name: "summarize_book" }, argument: { name: "length", value: "d" } });
+  assert.deepEqual(lens.completion.values, ["detailed"]);
 });
